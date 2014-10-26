@@ -120,6 +120,93 @@ namespace NowinTests
         }
 
         [Test]
+        public void PostEchoAppWithLongChunkedDataWorks()
+        {
+            var callCancelled = false;
+            var listener = CreateServer(
+                async env =>
+                {
+                    GetCallCancelled(env).Register(() => callCancelled = true);
+                    var requestStream = env.Get<Stream>("owin.RequestBody");
+                    var responseStream = env.Get<Stream>("owin.ResponseBody");
+                    var buffer = new MemoryStream();
+                    await requestStream.CopyToAsync(buffer, 4096);
+                    buffer.Seek(0, SeekOrigin.Begin);
+                    await buffer.CopyToAsync(responseStream, 4096);
+                });
+
+            using (listener)
+            {
+                var client = new HttpClient();
+                var request = new HttpRequestMessage(HttpMethod.Put, HttpClientAddress)
+                {
+                    Content = new PushStreamContent(async (stream, _, __) =>
+                {
+                    var array = new byte[100000];
+                    for (int i = 0; i < 10; i++)
+                    {
+                        await stream.WriteAsync(array, 0, array.Length);
+                        await stream.FlushAsync();
+                    }
+                    stream.Close();
+                })
+                };
+                request.Headers.TransferEncodingChunked = true;
+
+                var response = client.SendAsync(request).Result;
+                response.EnsureSuccessStatusCode();
+                Assert.AreEqual(1000000, response.Content.ReadAsByteArrayAsync().Result.Length);
+                Assert.False(callCancelled);
+            }
+        }
+
+        [Test]
+        public void PostEchoAppWithLongChunkedDataTwiceWorks()
+        {
+            var callCancelled = false;
+            var listener = CreateServer(
+                async env =>
+                {
+                    GetCallCancelled(env).Register(() => callCancelled = true);
+                    var requestStream = env.Get<Stream>("owin.RequestBody");
+                    var responseStream = env.Get<Stream>("owin.ResponseBody");
+                    var buffer = new MemoryStream();
+                    await requestStream.CopyToAsync(buffer, 4096);
+                    buffer.Seek(0, SeekOrigin.Begin);
+                    await buffer.CopyToAsync(responseStream, 4096);
+                });
+
+            using (listener)
+            {
+                for (int repeat = 0; repeat < 2; repeat++)
+                {
+                    using (var client = new HttpClient())
+                    {
+                        var request = new HttpRequestMessage(HttpMethod.Put, HttpClientAddress)
+                        {
+                            Content = new PushStreamContent(async (stream, _, __) =>
+                            {
+                                var array = new byte[100000];
+                                for (int i = 0; i < 10; i++)
+                                {
+                                    await stream.WriteAsync(array, 0, array.Length);
+                                    await stream.FlushAsync();
+                                }
+                                stream.Close();
+                            })
+                        };
+                        request.Headers.TransferEncodingChunked = true;
+
+                        var response = client.SendAsync(request).Result;
+                        response.EnsureSuccessStatusCode();
+                        Assert.AreEqual(1000000, response.Content.ReadAsByteArrayAsync().Result.Length);
+                        Assert.False(callCancelled);
+                    }
+                }
+            }
+        }
+
+        [Test]
         public void ConnectionClosedAfterStartReturningResponseAndThrowing()
         {
             bool callCancelled = false;
@@ -309,10 +396,10 @@ namespace NowinTests
                 });
 
             var request = new HttpRequestMessage(HttpMethod.Post, HttpClientAddress + "SubPath?QueryString")
-                {
-                    Content = new StringContent(SampleContent),
-                    Version = new Version(1, 0)
-                };
+            {
+                Content = new StringContent(SampleContent),
+                Version = new Version(1, 0)
+            };
             SendRequest(listener, request);
         }
 
@@ -363,9 +450,9 @@ namespace NowinTests
                 });
 
             var request = new HttpRequestMessage(HttpMethod.Post, HttpClientAddress + "SubPath?QueryString")
-                {
-                    Content = new StringContent(requestBody)
-                };
+            {
+                Content = new StringContent(requestBody)
+            };
             SendRequest(listener, request);
         }
 
@@ -438,9 +525,9 @@ namespace NowinTests
                 });
 
             var request = new HttpRequestMessage(HttpMethod.Post, HttpClientAddress)
-                {
-                    Content = new StringContent("")
-                };
+            {
+                Content = new StringContent("")
+            };
             SendRequest(listener, request);
         }
 
@@ -466,9 +553,9 @@ namespace NowinTests
                 });
 
             var request = new HttpRequestMessage(HttpMethod.Post, HttpClientAddress)
-                {
-                    Content = new StringContent(SampleContent)
-                };
+            {
+                Content = new StringContent(SampleContent)
+            };
             SendRequest(listener, request);
         }
 
@@ -863,6 +950,99 @@ namespace NowinTests
         }
 
         [Test]
+        public void HeadMethodEmptyBodyWithContentLength()
+        {
+            var listener = CreateServer(
+                env =>
+                {
+                    var responseHeaders = env.Get<IDictionary<string, string[]>>("owin.ResponseHeaders");
+                    responseHeaders.Add("Content-Length", new[] { "10" });
+                    return Task.Delay(0);
+                });
+
+            using (listener)
+            {
+                using (var client = new HttpClient())
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Head, HttpClientAddress);
+                    var response = client.SendAsync(request).Result;
+                    Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+                    Assert.AreEqual(10, response.Content.Headers.ContentLength);
+                    response.Dispose();
+                }
+            }
+        }
+
+        [Test]
+        public void HeadMethodWithLongBodyWillNotSendIt()
+        {
+            var listener = CreateServer(
+                async env =>
+                {
+                    var responseHeaders = env.Get<IDictionary<string, string[]>>("owin.ResponseHeaders");
+                    responseHeaders.Add("Content-Length", new[] { "10" });
+                    var responseStream = env.Get<Stream>("owin.ResponseBody");
+                    await responseStream.WriteAsync(new byte[10000], 0, 10000);
+                });
+
+            using (listener)
+            {
+                using (var client = new HttpClient())
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Head, HttpClientAddress);
+                    var response = client.SendAsync(request).Result;
+                    Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+                    Assert.AreEqual(10, response.Content.Headers.ContentLength);
+                    response.Dispose();
+                }
+            }
+        }
+
+        [Test]
+        public void HeadMethodWithLongBodyWillNotSendItUnknownLength()
+        {
+            var listener = CreateServer(
+                async env =>
+                {
+                    var responseStream = env.Get<Stream>("owin.ResponseBody");
+                    await responseStream.WriteAsync(new byte[10000], 0, 10000);
+                });
+
+            using (listener)
+            {
+                using (var client = new HttpClient())
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Head, HttpClientAddress);
+                    var response = client.SendAsync(request).Result;
+                    Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+                    Assert.AreEqual(0, response.Content.Headers.ContentLength);
+                    Assert.True(response.Headers.TransferEncodingChunked.HasValue);
+                    response.Dispose();
+                }
+            }
+        }
+
+        [Test]
+        public void HeadMethodWithoutBodyWillBeChunkedBecauseOfUnknownLength()
+        {
+            var listener = CreateServer(
+                env => Task.Delay(0));
+
+            using (listener)
+            {
+                using (var client = new HttpClient())
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Head, HttpClientAddress);
+                    var response = client.SendAsync(request).Result;
+                    Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+                    Assert.AreEqual(0, response.Content.Headers.ContentLength);
+                    Assert.True(response.Headers.TransferEncodingChunked.HasValue);
+                    response.Dispose();
+                }
+            }
+        }
+
+        [Test]
         public void LargeResponseBodyWith100AsyncWritesWorks()
         {
             OwinApp app = async env =>
@@ -1176,10 +1356,10 @@ namespace NowinTests
             using (listener)
             {
                 var handler = new WebRequestHandler
-                    {
-                        ServerCertificateValidationCallback = (a, b, c, d) => true,
-                        ClientCertificateOptions = ClientCertificateOption.Automatic
-                    };
+                {
+                    ServerCertificateValidationCallback = (a, b, c, d) => true,
+                    ClientCertificateOptions = ClientCertificateOption.Automatic
+                };
                 using (var client = new HttpClient(handler))
                 {
                     return client.GetAsync(address, HttpCompletionOption.ResponseContentRead).Result;
